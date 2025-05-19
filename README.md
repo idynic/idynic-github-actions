@@ -34,6 +34,17 @@ Creates and pushes new branches for issues with timestamp-based naming and confl
     timestamp: 'true'      # Optional
 ```
 
+#### [extract-issue-reference](./extract-issue-reference/)
+Extracts issue numbers from PR title, body, or branch name and implements GitHub best practices for issue status updates.
+```yaml
+- uses: idynic/idynic-github-actions/extract-issue-reference@main
+  with:
+    pr-title: ${{ github.event.pull_request.title }}
+    pr-body: ${{ github.event.pull_request.body }}
+    pr-branch: ${{ github.event.pull_request.head.ref }}
+    pr-action: ${{ github.event.action }}
+```
+
 #### [update-issue-status](./update-issue-status/)
 Updates issue status in GitHub Projects V2 boards using GraphQL API.
 ```yaml
@@ -90,9 +101,11 @@ idynic-github-actions/
 │   ├── workflows/      # Test and validation workflows
 │   └── settings.yml    # Repository configuration
 ├── create-issue-branch/   # Issue branch creation action
+├── extract-issue-reference/ # Issue extraction from PRs action
 ├── handle-issue-commands/ # Issue command processing action
 ├── update-issue-status/   # Issue status management action
 ├── docs/                 # Additional documentation
+├── pr-issue-status-update-template.yml # Template workflow for PR-issue linking
 └── README.md            # This file
 ```
 
