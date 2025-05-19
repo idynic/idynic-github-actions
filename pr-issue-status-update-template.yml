@@ -12,17 +12,22 @@ jobs:
   update-linked-issue:
     runs-on: ubuntu-latest
     steps:
+      # Check out the current repository first
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Then check out the GitHub Actions repository
       - name: Checkout GitHub Actions
         uses: actions/checkout@v4
         with:
           repository: idynic/idynic-github-actions
-          path: .github/actions
+          path: .github/actions/idynic-github-actions
           token: ${{ secrets.PROJECT_TOKEN }}
 
       # Extract issue number from PR and determine status update strategy
       - name: Extract issue reference
         id: extract-issue
-        uses: ./.github/actions/extract-issue-reference
+        uses: ./.github/actions/idynic-github-actions/extract-issue-reference
         with:
           pr-title: ${{ github.event.pull_request.title }}
           pr-body: ${{ github.event.pull_request.body }}
@@ -33,7 +38,7 @@ jobs:
       # Update issue status if needed
       - name: Update issue status
         if: steps.extract-issue.outputs.should-update-status == 'true'
-        uses: ./.github/actions/update-issue-status
+        uses: ./.github/actions/idynic-github-actions/update-issue-status
         with:
           issue-number: ${{ steps.extract-issue.outputs.issue-number }}
           status: ${{ steps.extract-issue.outputs.update-status }}
