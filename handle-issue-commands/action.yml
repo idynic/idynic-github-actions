@@ -1,0 +1,148 @@
+name: 'Handle Issue Commands'
+description: 'Handle slash commands in issue comments'
+inputs:
+  command:
+    description: 'The command to handle (e.g., start)'
+    required: true
+  issue-number:
+    description: 'The issue number'
+    required: true
+  github-token:
+    description: 'GitHub token'
+    required: true
+  repository:
+    description: 'Repository in owner/name format'
+    required: true
+  comment-user:
+    description: 'User who made the comment'
+    required: true
+
+outputs:
+  authorized:
+    description: 'Whether the user is authorized to run the command'
+    value: ${{ steps.check-auth.outputs.authorized }}
+  processed:
+    description: 'Whether the command was processed successfully'
+    value: ${{ steps.process-command.outputs.processed }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check command authorization
+      id: check-auth
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        echo "🔍 Checking authorization for user: ${{ inputs.comment-user }}"
+        
+        # Check if the commenter has write permissions
+        PERMISSION_LEVEL=$(gh api repos/${{ inputs.repository }}/collaborators/${{ inputs.comment-user }}/permission -q '.permission')
+        
+        if [[ "$PERMISSION_LEVEL" != "write" && "$PERMISSION_LEVEL" != "admin" ]]; then
+          echo "❌ User does not have write permissions (level: $PERMISSION_LEVEL)"
+          echo "authorized=false" >> $GITHUB_OUTPUT
+          
+          # Add unauthorized message
+          gh issue comment ${{ inputs.issue-number }} \
+            --repo ${{ inputs.repository }} \
+            --body "❌ @${{ inputs.comment-user }} - You don't have permission to use this command. Only repository collaborators with write access can start work on issues."
+        else
+          echo "✅ User has write permissions (level: $PERMISSION_LEVEL)"
+          echo "authorized=true" >> $GITHUB_OUTPUT
+          
+          # Add reaction to acknowledge command
+          COMMENT_ID=$(gh api "repos/${{ inputs.repository }}/issues/${{ inputs.issue-number }}/comments" --jq '.[-1].id')
+          gh api \
+            --method POST \
+            "repos/${{ inputs.repository }}/issues/comments/$COMMENT_ID/reactions" \
+            -f content='+1' || echo "Could not add reaction"
+        fi
+
+    - name: Validate command
+      id: validate-command
+      if: steps.check-auth.outputs.authorized == 'true'
+      shell: bash
+      run: |
+        echo "🔍 Validating command: ${{ inputs.command }}"
+        
+        # Normalize command (remove leading slash if present)
+        COMMAND="${{ inputs.command }}"
+        COMMAND="${COMMAND#/}"
+        
+        # Check if command is supported
+        case "$COMMAND" in
+          "start"|"done"|"review"|"close")
+            echo "✅ Valid command: $COMMAND"
+            echo "valid=true" >> $GITHUB_OUTPUT
+            echo "normalized_command=$COMMAND" >> $GITHUB_OUTPUT
+            ;;
+          *)
+            echo "❌ Invalid command: $COMMAND"
+            echo "valid=false" >> $GITHUB_OUTPUT
+            
+            # Add error message
+            gh issue comment ${{ inputs.issue-number }} \
+              --repo ${{ inputs.repository }} \
+              --body "❌ Unknown command: \`/$COMMAND\`. Available commands: \`/start\`, \`/done\`, \`/review\`, \`/close\`"
+            ;;
+        esac
+
+    - name: Process command
+      id: process-command
+      if: steps.check-auth.outputs.authorized == 'true' && steps.validate-command.outputs.valid == 'true'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        COMMAND="${{ steps.validate-command.outputs.normalized_command }}"
+        echo "📝 Processing command: $COMMAND"
+        
+        case "$COMMAND" in
+          "start")
+            echo "🚀 Starting work on issue #${{ inputs.issue-number }}"
+            gh issue comment ${{ inputs.issue-number }} \
+              --repo ${{ inputs.repository }} \
+              --body "🚀 @${{ inputs.comment-user }} is starting work on this issue."
+            
+            # Assign the issue to the commenter
+            gh issue edit ${{ inputs.issue-number }} \
+              --repo ${{ inputs.repository }} \
+              --add-assignee ${{ inputs.comment-user }}
+            ;;
+            
+          "done")
+            echo "✅ Marking issue #${{ inputs.issue-number }} as done"
+            gh issue comment ${{ inputs.issue-number }} \
+              --repo ${{ inputs.repository }} \
+              --body "✅ @${{ inputs.comment-user }} has marked this issue as done."
+            ;;
+            
+          "review")
+            echo "👀 Requesting review for issue #${{ inputs.issue-number }}"
+            gh issue comment ${{ inputs.issue-number }} \
+              --repo ${{ inputs.repository }} \
+              --body "👀 @${{ inputs.comment-user }} is requesting review for this issue."
+            ;;
+            
+          "close")
+            echo "🔒 Closing issue #${{ inputs.issue-number }}"
+            gh issue close ${{ inputs.issue-number }} \
+              --repo ${{ inputs.repository }} \
+              --comment "🔒 Issue closed by @${{ inputs.comment-user }}"
+            ;;
+        esac
+        
+        echo "processed=true" >> $GITHUB_OUTPUT
+
+    - name: Log command processing result
+      if: always()
+      shell: bash
+      run: |
+        echo "📊 Command processing summary:"
+        echo "- Command: ${{ inputs.command }}"
+        echo "- User: ${{ inputs.comment-user }}"
+        echo "- Issue: #${{ inputs.issue-number }}"
+        echo "- Authorized: ${{ steps.check-auth.outputs.authorized || 'false' }}"
+        echo "- Valid: ${{ steps.validate-command.outputs.valid || 'false' }}"
+        echo "- Processed: ${{ steps.process-command.outputs.processed || 'false' }}"

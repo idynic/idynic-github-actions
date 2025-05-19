@@ -1,0 +1,116 @@
+name: 'Create Issue Branch'
+description: 'Create and push a branch for an issue'
+inputs:
+  issue-number:
+    description: 'The issue number'
+    required: true
+  branch-prefix:
+    description: 'Prefix for the branch name'
+    default: 'issue'
+    required: false
+  github-token:
+    description: 'GitHub token'
+    required: true
+  repository:
+    description: 'Repository in owner/name format'
+    required: true
+  timestamp:
+    description: 'Whether to append timestamp to branch name'
+    default: 'true'
+    required: false
+
+outputs:
+  branch-name:
+    description: 'The name of the created branch'
+    value: ${{ steps.create-branch.outputs.branch_name }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      run: |
+        echo "🔍 Validating inputs..."
+        
+        if [ -z "${{ inputs.issue-number }}" ]; then
+          echo "❌ ERROR: issue-number is required"
+          exit 1
+        fi
+        
+        if [ -z "${{ inputs.github-token }}" ]; then
+          echo "❌ ERROR: github-token is required"
+          exit 1
+        fi
+        
+        if [ -z "${{ inputs.repository }}" ]; then
+          echo "❌ ERROR: repository is required"
+          exit 1
+        fi
+        
+        echo "✅ All required inputs provided"
+
+    - name: Create and push branch
+      id: create-branch
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        echo "🔧 Configuring git..."
+        
+        # Configure git with bot credentials
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        
+        # Ensure we're on main and up to date
+        echo "📥 Updating from main branch..."
+        git checkout main
+        git pull origin main
+        
+        # Create new branch name
+        if [ "${{ inputs.timestamp }}" == "true" ]; then
+          BRANCH_NAME="${{ inputs.branch-prefix }}-${{ inputs.issue-number }}-$(date +%s)"
+        else
+          BRANCH_NAME="${{ inputs.branch-prefix }}-${{ inputs.issue-number }}"
+        fi
+        
+        # Check if branch already exists
+        if git ls-remote --heads origin "$BRANCH_NAME" | grep -q "$BRANCH_NAME"; then
+          echo "⚠️ Branch $BRANCH_NAME already exists"
+          
+          # If timestamp is enabled, try again with current timestamp
+          if [ "${{ inputs.timestamp }}" == "true" ]; then
+            BRANCH_NAME="${{ inputs.branch-prefix }}-${{ inputs.issue-number }}-$(date +%s)"
+            echo "📝 Creating new branch with timestamp: $BRANCH_NAME"
+          else
+            echo "❌ ERROR: Branch already exists and timestamp is disabled"
+            exit 1
+          fi
+        fi
+        
+        # Create new branch
+        echo "🌿 Creating branch: $BRANCH_NAME"
+        git checkout -b "$BRANCH_NAME"
+        
+        # Push the branch
+        echo "🚀 Pushing branch to origin..."
+        git push -u origin "$BRANCH_NAME"
+        
+        echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+        echo "✅ Created and pushed branch: $BRANCH_NAME"
+
+    - name: Add comment with branch info
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        BRANCH_NAME="${{ steps.create-branch.outputs.branch_name }}"
+        
+        echo "💬 Adding comment to issue #${{ inputs.issue-number }}..."
+        
+        COMMENT_BODY="✅ Created and pushed branch: \`$BRANCH_NAME\`\n\nTo start working:\n\`\`\`bash\ngit fetch origin\ngit checkout $BRANCH_NAME\n\`\`\`"
+        
+        printf "%b" "$COMMENT_BODY" | gh issue comment ${{ inputs.issue-number }} \
+          --repo ${{ inputs.repository }} \
+          --body-file -
+        
+        echo "✅ Comment added to issue"
