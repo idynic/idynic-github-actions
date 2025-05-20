@@ -121,8 +121,8 @@ runs:
         
         # Also try with raw curl in case something's wrong with gh CLI
         echo "Trying with raw curl..."
-        echo 'query { organization(login: "idynic") { projectV2(number: 5) { id title } } }' > /tmp/query.json
-        curl -v -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/json" -d "@/tmp/query.json" https://api.github.com/graphql
+        echo '{"query": "query { organization(login: \"idynic\") { projectV2(number: 5) { id title } } }"}' > /tmp/query.json
+        curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/json" -d "@/tmp/query.json" https://api.github.com/graphql
         
         # Create GraphQL query for project (using the original parameterized version)
         PROJECT_QUERY="query GetProject(\$owner: String!, \$number: Int!) { ${OWNER_TYPE}(login: \$owner) { projectV2(number: \$number) { id title } } }"
@@ -297,23 +297,26 @@ runs:
           exit 1
         fi
         
-        # Check if content exists
-        if ! echo "$CONTENT_RESPONSE" | jq -e '.data.node.projectItems' > /dev/null; then
-          echo "Error: Content with ID ${{ inputs.content_node_id }} not found or is not an Issue/PR."
-          exit 1
-        fi
-        
         # Debug content item 
-        echo "Checking project items response:"
-        echo "$CONTENT_RESPONSE" | jq '.data.node.projectItems'
+        echo "Checking project items response..."
         
-        # Find if content is already on this project
-        PROJECT_ITEM_ID=$(echo "$CONTENT_RESPONSE" | jq --arg projectId "$PROJECT_ID" -r '
-          .data.node.projectItems.nodes[] | 
-          select(.project.id == $projectId) | 
-          .id' | head -n 1)
-          
-        echo "Project item ID result: $PROJECT_ITEM_ID"
+        # More robust error handling
+        if echo "$CONTENT_RESPONSE" | jq -e '.data.node.projectItems' > /dev/null; then
+            echo "Content found on project board"
+            echo "$CONTENT_RESPONSE" | jq '.data.node.projectItems'
+            
+            # Find if content is already on this project
+            PROJECT_ITEM_ID=$(echo "$CONTENT_RESPONSE" | jq --arg projectId "$PROJECT_ID" -r '
+              .data.node.projectItems.nodes[] | 
+              select(.project.id == $projectId) | 
+              .id' | head -n 1)
+              
+            echo "Project item ID result: $PROJECT_ITEM_ID"
+        else
+            echo "No project items found or error in response. Will try to add the item."
+            echo "Response was: $CONTENT_RESPONSE"
+            PROJECT_ITEM_ID=""
+        fi
         
         # Add item to project if not found
         if [ -z "$PROJECT_ITEM_ID" ]; then
