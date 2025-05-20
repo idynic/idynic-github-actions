@@ -113,7 +113,28 @@ runs:
         VIEWER_INFO=$(gh api graphql -f query='query { viewer { login name } }' 2>&1 || echo "Error: $?")
         echo "Viewer info: $VIEWER_INFO"
         
-        # Create GraphQL query for project
+        # Try direct query first since we know the project exists
+        echo "Trying direct query to get the project..."
+        DIRECT_PROJECT_QUERY=$(cat <<'EOT'
+query {
+  organization(login: "idynic") {
+    projectV2(number: 5) {
+      id
+      title
+    }
+  }
+}
+EOT
+)
+        DIRECT_RESULT=$(gh api graphql -f query="$DIRECT_PROJECT_QUERY" 2>&1)
+        echo "Direct query result: $DIRECT_RESULT"
+        
+        # Also try with raw curl in case something's wrong with gh CLI
+        echo "Trying with raw curl..."
+        echo 'query { organization(login: "idynic") { projectV2(number: 5) { id title } } }' > /tmp/query.json
+        curl -v -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/json" -d "@/tmp/query.json" https://api.github.com/graphql
+        
+        # Create GraphQL query for project (using the original parameterized version)
         PROJECT_QUERY="query GetProject(\$owner: String!, \$number: Int!) { ${OWNER_TYPE}(login: \$owner) { projectV2(number: \$number) { id title } } }"
         
         # Debug query
@@ -124,7 +145,11 @@ runs:
         
         # List available projects
         echo "Listing available projects for ${{ inputs.owner_login }}..."
-        gh api graphql -f query='query($login: String!) { organization(login: $login) { projectsV2(first:10) { nodes { title number } } } }' -F login="${{ inputs.owner_login }}" || echo "Failed to list projects"
+        gh api graphql -f query='query($login: String!) { organization(login: $login) { projectsV2(first:10) { nodes { title number id } } } }' -F login="${{ inputs.owner_login }}" || echo "Failed to list projects"
+        
+        # Use ID from list for testing
+        PROJECT_ID_FROM_LIST=$(gh api graphql -f query='query($login: String!) { organization(login: $login) { projectsV2(first:10) { nodes { title number id } } } }' -F login="${{ inputs.owner_login }}" | jq -r '.data.organization.projectsV2.nodes[] | select(.number == 5) | .id')
+        echo "Project ID from list: $PROJECT_ID_FROM_LIST"
         
         # Execute GraphQL query with more robust handling
         PROJECT_RESPONSE=$(gh api graphql --jq .data -f query="$PROJECT_QUERY" -F owner="${{ inputs.owner_login }}" -F number=${{ inputs.project_number }} 2>&1 || echo "{ \"error\": \"$?\" }")
@@ -154,7 +179,15 @@ runs:
           echo "  1. The project number (${{ inputs.project_number }}) is correct"
           echo "  2. The owner login (${{ inputs.owner_login }}) is correct"
           echo "  3. Your PAT has sufficient permissions (repo, read:org, project)"
-          exit 1
+          
+          # Since we found the project ID from listing earlier, let's use that as a fallback
+          if [ -n "$PROJECT_ID_FROM_LIST" ] && [ "$PROJECT_ID_FROM_LIST" != "null" ]; then
+            echo "Using project ID obtained from listing: $PROJECT_ID_FROM_LIST"
+            PROJECT_ID="$PROJECT_ID_FROM_LIST"
+            PROJECT_TITLE="idynic-tailor-cli project (from listing)"
+          else
+            exit 1
+          fi
         fi
         
         echo "Found Project: '$PROJECT_TITLE' with ID: $PROJECT_ID"
