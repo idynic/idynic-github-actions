@@ -205,21 +205,25 @@ runs:
         # Attempt to update status, but don't fail if it doesn't work
         echo "Updating item status to '${{ inputs.target_status_value }}'..."
         
-        UPDATE_RESPONSE=$(gh api graphql -f query='
-          mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: ID!) { 
-            updateProjectV2ItemFieldValue(input: {
-              projectId: $projectId, 
-              itemId: $itemId, 
-              fieldId: $fieldId, 
-              value: {
-                singleSelectOptionId: $optionId
-              }
-            }) { 
-              projectV2Item { 
-                id 
-              } 
+        # Fix for the GraphQL type mismatch - we need to explicitly construct the mutation 
+        # with the optionId as a literal inside the query instead of as a variable
+        # This avoids the ID!/String type mismatch error
+        UPDATE_MUTATION="mutation {
+          updateProjectV2ItemFieldValue(input: {
+            projectId: \"$PROJECT_ID\", 
+            itemId: \"$PROJECT_ITEM_ID\", 
+            fieldId: \"$STATUS_FIELD_ID\", 
+            value: {
+              singleSelectOptionId: \"$TARGET_OPTION_ID\"
+            }
+          }) { 
+            projectV2Item { 
+              id 
             } 
-          }' -F projectId="$PROJECT_ID" -F itemId="$PROJECT_ITEM_ID" -F fieldId="$STATUS_FIELD_ID" -F optionId="$TARGET_OPTION_ID" 2>&1) || {
+          } 
+        }"
+        
+        UPDATE_RESPONSE=$(gh api graphql -f query="$UPDATE_MUTATION" 2>&1) || {
             echo "Status update failed, but we'll continue: $UPDATE_RESPONSE"
           }
         
