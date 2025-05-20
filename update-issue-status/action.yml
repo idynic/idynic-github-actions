@@ -31,6 +31,13 @@ runs:
       env:
         GITHUB_TOKEN: ${{ inputs.token }}
       run: |
+        # Debug inputs
+        echo "Debug: issue-number = ${{ inputs.issue-number }}"
+        echo "Debug: status = ${{ inputs.status }}"
+        echo "Debug: pr-number = ${{ inputs.pr-number }}"
+        echo "Debug: pr-url = ${{ inputs.pr-url }}"
+        echo "Debug: message-type = ${{ inputs.message-type }}"
+        
         # Determine appropriate emoji and message based on message type
         if [ "${{ inputs.message-type }}" == "opened" ]; then
           EMOJI="📋"
@@ -58,21 +65,42 @@ runs:
         # Create comment message
         MESSAGE="${EMOJI} ${PR_REF}\n\n✅ Status updated to: **${{ inputs.status }}**"
         
+        echo "Debug: Using issue number: ${{ inputs.issue-number }}"
+        echo "Debug: MESSAGE = ${MESSAGE}"
+        
         # Use GitHub CLI to add comment if available
         if command -v gh &> /dev/null; then
-          if ! gh issue comment ${{ inputs.issue-number }} --body "${MESSAGE}"; then
+          echo "Debug: Using GitHub CLI to add comment"
+          ISSUE_NUMBER="${{ inputs.issue-number }}"
+          echo "Debug: ISSUE_NUMBER = ${ISSUE_NUMBER}"
+          
+          if [ -z "${ISSUE_NUMBER}" ]; then
+            echo "Error: Missing issue number, cannot add comment"
+            exit 1
+          fi
+          
+          echo "Debug: Running: gh issue comment ${ISSUE_NUMBER} --body \"${MESSAGE}\""
+          if ! gh issue comment ${ISSUE_NUMBER} --body "${MESSAGE}"; then
             echo "Failed to add comment using GitHub CLI"
             exit 1
           fi
         else
           # Fall back to curl API call if GitHub CLI not available
+          echo "Debug: Using curl to add comment"
           COMMENT_JSON=$(jq -n --arg body "${MESSAGE}" '{"body": $body}')
           REPO=$(echo $GITHUB_REPOSITORY)
+          ISSUE_NUMBER="${{ inputs.issue-number }}"
           
+          if [ -z "${ISSUE_NUMBER}" ]; then
+            echo "Error: Missing issue number, cannot add comment"
+            exit 1
+          fi
+          
+          echo "Debug: Posting to https://api.github.com/repos/${REPO}/issues/${ISSUE_NUMBER}/comments"
           if ! curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github.v3+json" \
             -d "${COMMENT_JSON}" \
-            "https://api.github.com/repos/${REPO}/issues/${{ inputs.issue-number }}/comments"; then
+            "https://api.github.com/repos/${REPO}/issues/${ISSUE_NUMBER}/comments"; then
             echo "Failed to add comment using API"
             exit 1
           fi
