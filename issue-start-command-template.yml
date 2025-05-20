@@ -1,0 +1,131 @@
+name: Process /start Issue Command
+
+# This workflow processes the "/start" comment command on issues
+# When a user comments "/start" on an issue, this workflow will:
+# 1. Check if the user is authorized (collaborator with write or admin access)
+# 2. If authorized:
+#    a. Move the issue to "In Progress" on the Project V2 board
+#    b. Assign the issue to the user who commented
+#    c. Post a confirmation comment
+
+# ===== REQUIRED SETUP =====
+# 1. Create a Personal Access Token (PAT) with:
+#    - `repo` scope (for repository access)
+#    - `read:org` scope (for organization project access)
+#    - `project` scope (for project board modifications)
+#    Store this token as a repository secret named PROJECT_TOKEN
+#
+# 2. Set the environment variables below to match your project:
+#    - PROJECT_OWNER_LOGIN: Your organization or username that owns the project
+#      (e.g., 'idynic' - found in the URL: github.com/idynic)
+#    - PROJECT_NUMBER: The project number from your GitHub Project V2 URL
+#      (e.g., if your project URL is github.com/orgs/idynic/projects/5, use '5')
+#    - STATUS_FIELD_NAME: (Optional) Default is 'Status', change if yours is different
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write    # Required for assigning issues and adding comments/reactions
+  contents: write  # Required if you want to create a branch (optional feature)
+
+# ===== CONFIGURATION =====
+# Change these variables to match your project setup
+env:
+  PROJECT_OWNER_LOGIN: idynic  # The organization or user that owns the project
+  PROJECT_NUMBER: 5            # The project number (from the URL)
+  STATUS_FIELD_NAME: Status    # The name of your status field (case-sensitive)
+
+jobs:
+  handle-start-command:
+    # Only run on:
+    # 1. Regular issues (not PRs)
+    # 2. When the comment is exactly "/start"
+    # 3. When comment is from a real user (not a bot)
+    if: github.event.issue.pull_request == null && github.event.comment.body == '/start' && github.event.sender.type == 'User'
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout the central actions repository
+      - name: Checkout Central Actions
+        uses: actions/checkout@v4
+        with:
+          repository: idynic/idynic-github-actions
+          path: ./.github/central-actions
+          ref: main  # Change to a specific tag for stability in production
+          # If idynic-github-actions is private, use:
+          # token: ${{ secrets.ACTIONS_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      # Check if user has write/admin permissions to use this command
+      - name: Check Authorization & React to Comment
+        id: auth_check
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PERMISSION=$(gh api repos/${{ github.repository }}/collaborators/${{ github.event.sender.login }}/permission -q '.permission' || echo "none")
+          echo "User permission: $PERMISSION"
+          
+          if [[ "$PERMISSION" == "admin" || "$PERMISSION" == "write" ]]; then
+            echo "User is authorized ✅"
+            echo "is_authorized=true" >> "$GITHUB_OUTPUT"
+            # Add thumbs-up reaction to indicate command was received
+            gh api --method POST /repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
+              -f content='+1' --silent
+          else
+            echo "User is not authorized ❌"
+            echo "is_authorized=false" >> "$GITHUB_OUTPUT"
+            # Post rejection comment
+            gh issue comment ${{ github.event.issue.number }} --repo ${{ github.repository }} \
+              --body "❌ @${{ github.event.sender.login }}, you are not authorized to use the /start command. You need write or admin permissions."
+            exit 1 # Fail the job to prevent further steps
+          fi
+
+      # Assign the issue to the user who commented
+      - name: Assign Issue
+        if: steps.auth_check.outputs.is_authorized == 'true'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue edit ${{ github.event.issue.number }} --repo ${{ github.repository }} --add-assignee ${{ github.event.sender.login }}
+          echo "Issue assigned to @${{ github.event.sender.login }} ✅"
+
+      # Update status on project board to "In Progress"
+      - name: Update Project V2 Status
+        if: steps.auth_check.outputs.is_authorized == 'true'
+        uses: ./.github/central-actions/update-project-v2-item-status
+        with:
+          github_token: ${{ secrets.PROJECT_TOKEN }}
+          owner_login: ${{ env.PROJECT_OWNER_LOGIN }}
+          project_number: ${{ env.PROJECT_NUMBER }}
+          content_node_id: ${{ github.event.issue.node_id }}
+          target_status_value: 'In Progress'
+          status_field_name: ${{ env.STATUS_FIELD_NAME }}
+
+      # Post confirmation comment
+      - name: Post Confirmation Comment
+        if: steps.auth_check.outputs.is_authorized == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ github.event.issue.number }},
+              body: "🚀 Work started by @${{ github.event.sender.login }}. Issue moved to 'In Progress' and assigned."
+            });
+
+      # OPTIONAL: Create branch for the issue
+      # Uncomment and customize the following section if you want to create a branch
+      # when the issue is started
+      # 
+      # - name: Create Branch for Issue
+      #   if: steps.auth_check.outputs.is_authorized == 'true'
+      #   uses: ./.github/central-actions/create-issue-branch
+      #   with:
+      #     github_token: ${{ secrets.GITHUB_TOKEN }}
+      #     issue_number: ${{ github.event.issue.number }}
+      #     branch_name: 'issue-${{ github.event.issue.number }}'
+      #     # Optional: Add additional configuration for branch creation

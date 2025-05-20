@@ -1,0 +1,168 @@
+name: Update Linked Issue Project Status on PR Event
+
+# This workflow automates updating the status of linked issues on a Project V2 board
+# when Pull Requests are opened, marked ready for review, or merged.
+#
+# When a PR is:
+# - Opened or ready for review: Linked issue moved to "Waiting for Review"
+# - Merged: Linked issue moved to "Done" and closed
+
+# ===== REQUIRED SETUP =====
+# 1. Create a Personal Access Token (PAT) with:
+#    - `repo` scope (for repository access)
+#    - `read:org` scope (for organization project access)
+#    - `project` scope (for project board modifications)
+#    Store this token as a repository secret named PROJECT_TOKEN
+#
+# 2. Set the environment variables below to match your project:
+#    - PROJECT_OWNER_LOGIN: Your organization or username that owns the project
+#      (e.g., 'idynic' - found in the URL: github.com/idynic)
+#    - PROJECT_NUMBER: The project number from your GitHub Project V2 URL
+#      (e.g., if your project URL is github.com/orgs/idynic/projects/5, use '5')
+
+on:
+  pull_request:
+    types:
+      - opened
+      - ready_for_review
+      - closed
+
+permissions:
+  issues: write       # Required for commenting on and closing issues
+  pull-requests: read # Required for reading PR details
+
+# ===== CONFIGURATION =====
+# Change these variables to match your project setup
+env:
+  PROJECT_OWNER_LOGIN: idynic  # The organization or user that owns the project
+  PROJECT_NUMBER: 5            # The project number (from the URL)
+  REVIEW_STATUS: Waiting for Review  # Status for PRs opened/ready for review
+  DONE_STATUS: Done            # Status for merged PRs
+
+jobs:
+  update_linked_issue_status:
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout the central actions repository
+      - name: Checkout Central Actions
+        uses: actions/checkout@v4
+        with:
+          repository: idynic/idynic-github-actions
+          path: ./.github/central-actions
+          ref: main  # Change to a specific tag for stability in production
+          # If idynic-github-actions is private, use:
+          # token: ${{ secrets.ACTIONS_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+      
+      # Extract linked issue number from PR title, body, or branch name
+      - name: Extract Linked Issue Number
+        id: extract_issue
+        uses: ./.github/central-actions/get-pr-linked-issue-number
+        with:
+          pr_title: ${{ github.event.pull_request.title }}
+          pr_body: ${{ github.event.pull_request.body }}
+          pr_branch: ${{ github.event.pull_request.head.ref }}
+      
+      # Get Issue Node ID if issue number was found
+      - name: Get Issue Node ID
+        id: get_issue_node
+        if: steps.extract_issue.outputs.issue_number != ''
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Found linked issue #${{ steps.extract_issue.outputs.issue_number }}, retrieving Node ID..."
+          
+          NODE_ID=$(gh api graphql -f query='
+            query($owner: String!, $repo: String!, $issueNum: Int!) {
+              repository(owner:$owner, name:$repo) {
+                issue(number:$issueNum) {
+                  id
+                }
+              }
+            }' \
+            -F owner='${{ github.repository_owner }}' \
+            -F repo='${{ github.event.repository.name }}' \
+            -F issueNum=${{ steps.extract_issue.outputs.issue_number }} \
+            -q '.data.repository.issue.id' || echo "")
+          
+          if [ -z "$NODE_ID" ]; then 
+            echo "Error: Could not retrieve Node ID for issue #${{ steps.extract_issue.outputs.issue_number }}." >&2
+            exit 1
+          else 
+            echo "Found Node ID: $NODE_ID"
+          fi
+          
+          echo "issue_node_id=$NODE_ID" >> "$GITHUB_OUTPUT"
+      
+      # Handle PR opened or ready for review - move to "Waiting for Review"
+      - name: Set Status to "Waiting for Review"
+        id: set_reviewing_status
+        if: steps.get_issue_node.outputs.issue_node_id != '' && (github.event.action == 'opened' || github.event.action == 'ready_for_review')
+        uses: ./.github/central-actions/update-project-v2-item-status
+        with:
+          github_token: ${{ secrets.PROJECT_TOKEN }}
+          owner_login: ${{ env.PROJECT_OWNER_LOGIN }}
+          project_number: ${{ env.PROJECT_NUMBER }}
+          content_node_id: ${{ steps.get_issue_node.outputs.issue_node_id }}
+          target_status_value: ${{ env.REVIEW_STATUS }}
+      
+      # Add comment for "Waiting for Review" status
+      - name: Comment on Issue - Waiting for Review
+        if: steps.set_reviewing_status.outputs.project_item_id != ''
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const action = '${{ github.event.action }}';
+            const prStatus = action === 'opened' ? 'opened' : 'ready for review';
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ steps.extract_issue.outputs.issue_number }},
+              body: `📝 PR #${{ github.event.pull_request.number }} is ${prStatus}. Linked issue #${{ steps.extract_issue.outputs.issue_number }} moved to '${{ env.REVIEW_STATUS }}'.`
+            });
+      
+      # Handle PR merged - move to "Done" and close issue
+      - name: Set Status to "Done" on Merged PR
+        id: set_done_status
+        if: steps.get_issue_node.outputs.issue_node_id != '' && github.event.action == 'closed' && github.event.pull_request.merged == true
+        uses: ./.github/central-actions/update-project-v2-item-status
+        with:
+          github_token: ${{ secrets.PROJECT_TOKEN }}
+          owner_login: ${{ env.PROJECT_OWNER_LOGIN }}
+          project_number: ${{ env.PROJECT_NUMBER }}
+          content_node_id: ${{ steps.get_issue_node.outputs.issue_node_id }}
+          target_status_value: ${{ env.DONE_STATUS }}
+      
+      # Close issue and add comment for "Done" status
+      - name: Close Issue & Comment - Done
+        if: steps.set_done_status.outputs.project_item_id != ''
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issue_number = parseInt(${{ steps.extract_issue.outputs.issue_number }});
+            
+            // Close the issue
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              state: 'closed'
+            });
+            
+            // Add comment
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              body: `✅ PR #${{ github.event.pull_request.number }} merged! Linked issue #${{ steps.extract_issue.outputs.issue_number }} moved to '${{ env.DONE_STATUS }}' and closed.`
+            });
+      
+      # Handle case when no linked issue was found
+      - name: No Linked Issue Found
+        if: steps.extract_issue.outputs.issue_number == ''
+        run: |
+          echo "No linked issue found in PR title, body, or branch name."
+          echo "To link an issue, use phrases like 'Fixes #123' or 'Closes #123' in the PR title or description."

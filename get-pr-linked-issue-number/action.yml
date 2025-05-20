@@ -1,0 +1,53 @@
+name: Get PR Linked Issue Number
+description: Extracts the first linked issue number from a PR's title, body, or branch name.
+
+inputs:
+  pr_title:
+    description: The Pull Request title.
+    required: true
+  pr_body:
+    description: The Pull Request body content.
+    required: true
+  pr_branch:
+    description: The name of the PR's head branch.
+    required: true
+
+outputs:
+  issue_number:
+    description: The extracted issue number, if found. Empty otherwise.
+
+runs:
+  using: composite
+  steps:
+    - name: Extract linked issue number
+      id: extract_issue
+      shell: bash
+      run: |
+        FULL_TEXT="${{ inputs.pr_title }}\n${{ inputs.pr_body }}"
+        # Look for common linking keywords followed by issue number
+        ISSUE_NUM=$(echo "$FULL_TEXT" | grep -oP '(?<=(closes|fixes|resolves) #)[0-9]+' -i | head -n 1)
+        
+        # If not found, look for any #number references
+        if [ -z "$ISSUE_NUM" ]; then 
+          ISSUE_NUM=$(echo "$FULL_TEXT" | grep -oP '#[0-9]+' | sed 's/#//' | head -n 1)
+        fi
+        
+        # If still not found, check branch name for patterns like issue/123 or feature/123
+        if [ -z "$ISSUE_NUM" ]; then 
+          ISSUE_NUM=$(echo "${{ inputs.pr_branch }}" | grep -oP '(?<=(issue|feature|fix)/)[0-9]+' -i | head -n 1)
+        fi
+        
+        # Last attempt: check for branches that start with a number like 123-feature-branch
+        if [ -z "$ISSUE_NUM" ]; then 
+          ISSUE_NUM=$(echo "${{ inputs.pr_branch }}" | grep -oP '^[0-9]+(?=-)' | head -n 1)
+        fi
+        
+        # Report result
+        if [ -n "$ISSUE_NUM" ]; then 
+          echo "Found issue number: $ISSUE_NUM"
+        else 
+          echo "No issue number found."
+        fi
+        
+        # Set output
+        echo "issue_number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"

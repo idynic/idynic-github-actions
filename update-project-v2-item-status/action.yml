@@ -1,0 +1,433 @@
+name: Update Project V2 Item Status
+description: Sets the status of an item (linked to an issue or PR) on a GitHub Project V2 board.
+
+inputs:
+  github_token:
+    description: A Personal Access Token (PAT) with `repo`, `read:org`, and `project` scopes. **GITHUB_TOKEN will NOT work for organization projects.**
+    required: true
+  owner_login:
+    description: The login of the organization or user that owns the GitHub Project (e.g., 'idynic').
+    required: true
+  project_number:
+    description: The number of the Project V2 (e.g., 5 if the URL is /orgs/owner/projects/5).
+    required: true
+    type: integer
+  content_node_id:
+    description: The GraphQL Node ID of the content (Issue or Pull Request) whose status is to be updated on the project board.
+    required: true
+  target_status_value:
+    description: The exact string value of the desired status (e.g., 'In Progress', 'Done'). This MUST match an existing option in your project's status field.
+    required: true
+  status_field_name:
+    description: The name of the custom 'Status' field in your Project V2. This is case-sensitive.
+    required: false
+    default: Status
+
+outputs:
+  project_item_id:
+    description: The GraphQL Node ID of the project item that was created or updated.
+
+runs:
+  using: composite
+  steps:
+    - name: Install jq utility
+      shell: bash
+      run: |
+        if ! command -v jq &> /dev/null; then
+          sudo apt-get update -qq && sudo apt-get install -y jq
+        else
+          echo "jq already installed."
+        fi
+
+    - name: Update Project V2 Item Status
+      id: update_status_script
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        set -euo pipefail
+
+        # 1. Fetch Project ID
+        echo "Fetching Project ID for project #${{ inputs.project_number }} owned by ${{ inputs.owner_login }}..."
+        
+        # Determine if owner is organization or user using REST API
+        echo "Determining owner type..."
+        OWNER_RESPONSE=$(gh api "users/${{ inputs.owner_login }}" --silent 2>&1 || echo '{"type": "not_found"}')
+        
+        if [ $? -ne 0 ] && [[ "$OWNER_RESPONSE" != *"not_found"* ]]; then
+          echo "Error checking owner type:"
+          echo "$OWNER_RESPONSE"
+          exit 1
+        fi
+        
+        OWNER_TYPE=$(echo "$OWNER_RESPONSE" | jq -r '.type // "not_found"')
+        
+        if [ "$OWNER_TYPE" = "User" ]; then
+          OWNER_TYPE="user"
+        elif [ "$OWNER_TYPE" = "Organization" ]; then
+          OWNER_TYPE="organization"
+        else
+          # If we can't determine directly, try alternate method
+          echo "Owner type not determined from API, trying alternate methods..."
+          VIEWER_QUERY='query { viewer { login } }'
+          VIEWER_RESPONSE=$(gh api graphql -f query="$VIEWER_QUERY" 2>&1)
+          
+          if [ $? -ne 0 ]; then
+            echo "Error fetching viewer login:"
+            echo "$VIEWER_RESPONSE"
+            exit 1
+          fi
+          
+          if echo "$VIEWER_RESPONSE" | jq -e '.errors' > /dev/null; then
+            echo "GraphQL Error fetching viewer login:"
+            echo "$VIEWER_RESPONSE" | jq '.errors'
+            exit 1
+          fi
+          
+          VIEWER_LOGIN=$(echo "$VIEWER_RESPONSE" | jq -r '.data.viewer.login')
+          
+          if [ "$VIEWER_LOGIN" = "${{ inputs.owner_login }}" ]; then
+            OWNER_TYPE="user"
+          else
+            # As last resort, check if organization exists
+            ORG_CHECK=$(gh api "orgs/${{ inputs.owner_login }}" --silent 2>&1 || echo '{"message": "not_found"}')
+            if [[ "$ORG_CHECK" == *"not_found"* ]]; then
+              OWNER_TYPE="user"
+              echo "WARNING: Could not definitively determine if '${{ inputs.owner_login }}' is a user or organization. Assuming user."
+            else
+              OWNER_TYPE="organization"
+            fi
+          fi
+        fi
+        
+        echo "Detected owner type: $OWNER_TYPE"
+        
+        # Properly define GraphQL query with variables
+        PROJECT_QUERY=$(cat <<EOF
+        query GetProject(\$owner: String!, \$number: Int!) {
+          ${OWNER_TYPE}(login: \$owner) {
+            projectV2(number: \$number) {
+              id
+              title
+            }
+          }
+        }
+EOF
+        )
+        
+        # Execute GraphQL query
+        PROJECT_RESPONSE=$(gh api graphql -f query="$PROJECT_QUERY" \
+          -F owner="${{ inputs.owner_login }}" \
+          -F number=${{ inputs.project_number }} 2>&1)
+        
+        # Check gh api exit code
+        if [ $? -ne 0 ]; then
+          echo "Error executing project query:"
+          echo "$PROJECT_RESPONSE"
+          exit 1
+        fi
+        
+        # Check for GraphQL errors
+        if echo "$PROJECT_RESPONSE" | jq -e '.errors' > /dev/null; then
+          echo "GraphQL Error fetching project:"
+          echo "$PROJECT_RESPONSE" | jq '.errors'
+          echo "Query was:"
+          echo "$PROJECT_QUERY"
+          exit 1
+        fi
+        
+        # Extract project ID and title
+        PROJECT_ID=$(echo "$PROJECT_RESPONSE" | jq -r ".data.${OWNER_TYPE}.projectV2.id")
+        PROJECT_TITLE=$(echo "$PROJECT_RESPONSE" | jq -r ".data.${OWNER_TYPE}.projectV2.title")
+        
+        if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "null" ]; then
+          echo "Error: Project V2 #${{ inputs.project_number }} not found for owner '${{ inputs.owner_login }}'."
+          echo "Please verify that:"
+          echo "  1. The project number (${{ inputs.project_number }}) is correct"
+          echo "  2. The owner login (${{ inputs.owner_login }}) is correct"
+          echo "  3. Your PAT has sufficient permissions (repo, read:org, project)"
+          exit 1
+        fi
+        
+        echo "Found Project: '$PROJECT_TITLE' with ID: $PROJECT_ID"
+        
+        # 2. Fetch Status Field ID & Target Option ID
+        echo "Fetching fields for project and looking for field '${{ inputs.status_field_name }}' and target status '${{ inputs.target_status_value }}'..."
+        
+        # Define GraphQL query
+        FIELDS_QUERY=$(cat <<EOF
+        query GetProjectFields(\$projectId: ID!) {
+          node(id: \$projectId) {
+            ... on ProjectV2 {
+              fields(first: 20) {
+                nodes {
+                  ... on ProjectV2Field {
+                    id
+                    name
+                    dataType
+                  }
+                  ... on ProjectV2SingleSelectField {
+                    id
+                    name
+                    options {
+                      id
+                      name
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+EOF
+        )
+        
+        # Execute GraphQL query
+        FIELDS_RESPONSE=$(gh api graphql -f query="$FIELDS_QUERY" -F projectId="$PROJECT_ID" 2>&1)
+        
+        # Check gh api exit code
+        if [ $? -ne 0 ]; then
+          echo "Error executing fields query:"
+          echo "$FIELDS_RESPONSE"
+          exit 1
+        fi
+        
+        # Check for GraphQL errors
+        if echo "$FIELDS_RESPONSE" | jq -e '.errors' > /dev/null; then
+          echo "GraphQL Error fetching project fields:"
+          echo "$FIELDS_RESPONSE" | jq '.errors'
+          echo "Query was:"
+          echo "$FIELDS_QUERY"
+          exit 1
+        fi
+        
+        # Extract all field names for error reporting
+        FIELD_NAMES=$(echo "$FIELDS_RESPONSE" | jq -r '.data.node.fields.nodes[].name')
+        
+        # Use a direct jq command to extract both the field ID and option ID in one go
+        IDS_RESULT=$(echo "$FIELDS_RESPONSE" | jq --arg fieldName "${{ inputs.status_field_name }}" --arg optionName "${{ inputs.target_status_value }}" '
+          # First find the status field by name
+          .data.node.fields.nodes[] | 
+          select(.name == $fieldName) | 
+          { 
+            "field_id": .id, 
+            "field_name": .name,
+            "is_select": (if has("options") then true else false end),
+            # Then find the target option by name and get its ID
+            "option_id": (
+              if has("options") then
+                (.options[] | select(.name == $optionName) | .id) // null
+              else 
+                null 
+              end
+            ),
+            # Also get all available options for error reporting
+            "available_options": (
+              if has("options") then
+                [.options[].name] | join(", ")
+              else 
+                null
+              end
+            )
+          }
+        ')
+        
+        # Extract values from the jq result
+        STATUS_FIELD_ID=$(echo "$IDS_RESULT" | jq -r '.field_id // "null"')
+        IS_SELECT_FIELD=$(echo "$IDS_RESULT" | jq -r '.is_select // "false"')
+        TARGET_OPTION_ID=$(echo "$IDS_RESULT" | jq -r '.option_id // "null"')
+        AVAILABLE_OPTIONS=$(echo "$IDS_RESULT" | jq -r '.available_options // "No options available"')
+        
+        # Check if the status field was found
+        if [ -z "$STATUS_FIELD_ID" ] || [ "$STATUS_FIELD_ID" = "null" ]; then
+          echo "Error: Status field '${{ inputs.status_field_name }}' not found in project."
+          echo "Available fields:"
+          echo "$FIELD_NAMES" | sed 's/^/  - /'
+          exit 1
+        fi
+        
+        # Check if the field is a single select field
+        if [ "$IS_SELECT_FIELD" != "true" ]; then
+          echo "Error: Field '${{ inputs.status_field_name }}' is not a single select field."
+          exit 1
+        fi
+        
+        # Check if the target option was found
+        if [ -z "$TARGET_OPTION_ID" ] || [ "$TARGET_OPTION_ID" = "null" ]; then
+          echo "Error: Status option '${{ inputs.target_status_value }}' not found in field '${{ inputs.status_field_name }}'."
+          echo "Available options:"
+          echo "$AVAILABLE_OPTIONS" | tr ',' '\n' | sed 's/^/  - /'
+          exit 1
+        fi
+        
+        echo "Found Status Field ID: $STATUS_FIELD_ID"
+        echo "Found Target Option ID: $TARGET_OPTION_ID"
+        
+        # 3. Fetch or Create Project Item ID
+        echo "Checking if content is already on the project board..."
+        
+        # Define GraphQL query
+        CONTENT_QUERY=$(cat <<EOF
+        query GetContentItems(\$contentId: ID!, \$projectId: ID!) {
+          node(id: \$contentId) {
+            ... on Issue {
+              projectItems(first: 10, includeArchived: false) {
+                nodes {
+                  id
+                  project {
+                    id
+                  }
+                }
+              }
+            }
+            ... on PullRequest {
+              projectItems(first: 10, includeArchived: false) {
+                nodes {
+                  id
+                  project {
+                    id
+                  }
+                }
+              }
+            }
+          }
+        }
+EOF
+        )
+        
+        # Execute GraphQL query
+        CONTENT_RESPONSE=$(gh api graphql -f query="$CONTENT_QUERY" -F contentId="${{ inputs.content_node_id }}" -F projectId="$PROJECT_ID" 2>&1)
+        
+        # Check gh api exit code
+        if [ $? -ne 0 ]; then
+          echo "Error executing content items query:"
+          echo "$CONTENT_RESPONSE"
+          exit 1
+        fi
+        
+        # Check for GraphQL errors
+        if echo "$CONTENT_RESPONSE" | jq -e '.errors' > /dev/null; then
+          echo "GraphQL Error checking content item:"
+          echo "$CONTENT_RESPONSE" | jq '.errors'
+          echo "Query was:"
+          echo "$CONTENT_QUERY"
+          exit 1
+        fi
+        
+        # Check if the content exists and has project items
+        if ! echo "$CONTENT_RESPONSE" | jq -e '.data.node.projectItems' > /dev/null; then
+          echo "Error: Content with ID ${{ inputs.content_node_id }} not found or is not an Issue/PR."
+          exit 1
+        fi
+        
+        # Find if content is already on this project using direct jq, avoiding subshell issues
+        PROJECT_ITEM_ID=$(echo "$CONTENT_RESPONSE" | jq --arg projectId "$PROJECT_ID" -r '
+          .data.node.projectItems.nodes[] | 
+          select(.project.id == $projectId) | 
+          .id' | head -n 1)
+        
+        # If not found, add it to the project
+        if [ -z "$PROJECT_ITEM_ID" ]; then
+          echo "Content not found on project. Adding it now..."
+          
+          # Define GraphQL mutation
+          ADD_ITEM_MUTATION=$(cat <<EOF
+          mutation AddProjectItem(\$projectId: ID!, \$contentId: ID!) {
+            addProjectV2ItemById(input: {projectId: \$projectId, contentId: \$contentId}) {
+              item {
+                id
+              }
+            }
+          }
+EOF
+          )
+          
+          # Execute GraphQL mutation
+          ADD_ITEM_RESPONSE=$(gh api graphql -f query="$ADD_ITEM_MUTATION" -F projectId="$PROJECT_ID" -F contentId="${{ inputs.content_node_id }}" 2>&1)
+          
+          # Check gh api exit code
+          if [ $? -ne 0 ]; then
+            echo "Error executing add item mutation:"
+            echo "$ADD_ITEM_RESPONSE"
+            exit 1
+          fi
+          
+          # Check for GraphQL errors
+          if echo "$ADD_ITEM_RESPONSE" | jq -e '.errors' > /dev/null; then
+            echo "GraphQL Error adding item to project:"
+            echo "$ADD_ITEM_RESPONSE" | jq '.errors'
+            echo "Mutation was:"
+            echo "$ADD_ITEM_MUTATION"
+            exit 1
+          fi
+          
+          # Extract the new project item ID
+          PROJECT_ITEM_ID=$(echo "$ADD_ITEM_RESPONSE" | jq -r '.data.addProjectV2ItemById.item.id')
+          
+          if [ -z "$PROJECT_ITEM_ID" ] || [ "$PROJECT_ITEM_ID" = "null" ]; then
+            echo "Error: Failed to add content to project."
+            exit 1
+          fi
+          
+          echo "Successfully added content to project as item ID: $PROJECT_ITEM_ID"
+        else
+          echo "Content already on project as item ID: $PROJECT_ITEM_ID"
+        fi
+        
+        # 4. Update Item Status
+        echo "Updating item status to '${{ inputs.target_status_value }}'..."
+        
+        # Define GraphQL mutation
+        UPDATE_STATUS_MUTATION=$(cat <<EOF
+        mutation UpdateItemStatus(\$projectId: ID!, \$itemId: ID!, \$fieldId: ID!, \$optionId: ID!) {
+          updateProjectV2ItemFieldValue(
+            input: {
+              projectId: \$projectId,
+              itemId: \$itemId,
+              fieldId: \$fieldId,
+              value: {
+                singleSelectOptionId: \$optionId
+              }
+            }
+          ) {
+            projectV2Item {
+              id
+            }
+          }
+        }
+EOF
+        )
+        
+        # Execute GraphQL mutation
+        UPDATE_STATUS_RESPONSE=$(gh api graphql -f query="$UPDATE_STATUS_MUTATION" \
+          -F projectId="$PROJECT_ID" \
+          -F itemId="$PROJECT_ITEM_ID" \
+          -F fieldId="$STATUS_FIELD_ID" \
+          -F optionId="$TARGET_OPTION_ID" 2>&1)
+        
+        # Check gh api exit code
+        if [ $? -ne 0 ]; then
+          echo "Error executing update status mutation:"
+          echo "$UPDATE_STATUS_RESPONSE"
+          exit 1
+        fi
+        
+        # Check for GraphQL errors
+        if echo "$UPDATE_STATUS_RESPONSE" | jq -e '.errors' > /dev/null; then
+          echo "GraphQL Error updating item status:"
+          echo "$UPDATE_STATUS_RESPONSE" | jq '.errors'
+          echo "Mutation was:"
+          echo "$UPDATE_STATUS_MUTATION"
+          exit 1
+        fi
+        
+        # Verify the update worked
+        UPDATED_ITEM_ID=$(echo "$UPDATE_STATUS_RESPONSE" | jq -r '.data.updateProjectV2ItemFieldValue.projectV2Item.id')
+        
+        if [ -z "$UPDATED_ITEM_ID" ] || [ "$UPDATED_ITEM_ID" = "null" ]; then
+          echo "Error: Failed to update item status."
+          exit 1
+        fi
+        
+        echo "Successfully updated item $PROJECT_ITEM_ID to status '${{ inputs.target_status_value }}'."
+        echo "project_item_id=$PROJECT_ITEM_ID" >> "$GITHUB_OUTPUT"
