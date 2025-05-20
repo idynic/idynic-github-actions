@@ -115,17 +115,7 @@ runs:
         
         # Try direct query first since we know the project exists
         echo "Trying direct query to get the project..."
-        DIRECT_PROJECT_QUERY=$(cat <<'EOT'
-query {
-  organization(login: "idynic") {
-    projectV2(number: 5) {
-      id
-      title
-    }
-  }
-}
-EOT
-)
+        DIRECT_PROJECT_QUERY='query { organization(login: "idynic") { projectV2(number: 5) { id title } } }'
         DIRECT_RESULT=$(gh api graphql -f query="$DIRECT_PROJECT_QUERY" 2>&1)
         echo "Direct query result: $DIRECT_RESULT"
         
