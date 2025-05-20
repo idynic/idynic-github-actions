@@ -1,233 +1,81 @@
 name: 'Update Issue Status'
-description: 'Update GitHub issue status in project board using GraphQL API'
+description: 'Update GitHub issue status by adding a comment'
 inputs:
   issue-number:
     description: 'The issue number to update'
     required: true
   status:
-    description: 'The new status to set'
+    description: 'The new status to set (e.g. "In Progress", "Done")'
     required: true
   token:
-    description: 'GitHub token with project permissions'
+    description: 'GitHub token with repo permissions'
     required: true
-  organization:
-    description: 'Organization name'
-    default: 'idynic'
+  pr-url:
+    description: 'URL of the related pull request'
     required: false
-  project-name:
-    description: 'Project name to search for (defaults to "{repo} project")'
+    default: ''
+  pr-number:
+    description: 'Number of the related pull request'
     required: false
-  project-number:
-    description: 'Project number in the organization (deprecated - use project-name)'
+    default: ''
+  message-type:
+    description: 'Type of message (opened, ready, merged)'
     required: false
+    default: 'updated'
 
 runs:
   using: 'composite'
   steps:
-    - name: Validate inputs
-      shell: bash
-      run: |
-        echo "🔍 Validating inputs..."
-        
-        if [ -z "${{ inputs.issue-number }}" ]; then
-          echo "❌ ERROR: issue-number is required"
-          exit 1
-        fi
-        
-        if [ -z "${{ inputs.status }}" ]; then
-          echo "❌ ERROR: status is required"
-          exit 1
-        fi
-        
-        if [ -z "${{ inputs.token }}" ]; then
-          echo "❌ ERROR: token is required"
-          exit 1
-        fi
-        
-        echo "✅ Input validation passed"
-        echo "Issue: #${{ inputs.issue-number }}"
-        echo "Status: ${{ inputs.status }}"
-        echo "Organization: ${{ inputs.organization }}"
-        
-        # Get repository name from GITHUB_REPOSITORY
-        REPO_NAME=$(echo $GITHUB_REPOSITORY | cut -d'/' -f2)
-        
-        # Determine project name
-        if [ -n "${{ inputs.project-name }}" ]; then
-          PROJECT_NAME="${{ inputs.project-name }}"
-        else
-          # Default to "{repo} project"
-          PROJECT_NAME="$REPO_NAME project"
-        fi
-        echo "Project Name: $PROJECT_NAME"
-
-    - name: Update status
+    - name: Add comment to issue
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.token }}
       run: |
-        echo "📝 Updating issue #${{ inputs.issue-number }} status to '${{ inputs.status }}'..."
-        
-        # Get repository owner and name
-        REPO_OWNER=$(echo $GITHUB_REPOSITORY | cut -d'/' -f1)
-        REPO_NAME=$(echo $GITHUB_REPOSITORY | cut -d'/' -f2)
-        
-        # Determine project name for search
-        if [ -n "${{ inputs.project-name }}" ]; then
-          PROJECT_NAME="${{ inputs.project-name }}"
+        # Determine appropriate emoji and message based on message type
+        if [ "${{ inputs.message-type }}" == "opened" ]; then
+          EMOJI="📋"
+          ACTION="opened"
+        elif [ "${{ inputs.message-type }}" == "ready" ]; then
+          EMOJI="📋"
+          ACTION="is ready for review"
+        elif [ "${{ inputs.message-type }}" == "merged" ]; then
+          EMOJI="🎉"
+          ACTION="has been merged"
         else
-          # Default to "{repo} project"
-          PROJECT_NAME="$REPO_NAME project"
+          EMOJI="🔄"
+          ACTION="has been updated"
         fi
         
-        # GraphQL query to find project by name
-        echo "🔍 Searching for project: $PROJECT_NAME"
-        PROJECTS_QUERY=$(cat <<EOF
-        {
-          organization(login: "${{ inputs.organization }}") {
-            projectsV2(first: 50, query: "$PROJECT_NAME") {
-              nodes {
-                id
-                title
-                field(name: "Status") {
-                  ... on ProjectV2SingleSelectField {
-                    id
-                    options {
-                      id
-                      name
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-        EOF
-        )
-        
-        REQUEST_BODY=$(jq -n --arg query "$PROJECTS_QUERY" '{ query: $query }')
-        
-        PROJECTS_RESPONSE=$(curl -s -H "Authorization: bearer $GITHUB_TOKEN" \
-          -H "Content-Type: application/json" \
-          -X POST \
-          -d "$REQUEST_BODY" \
-          https://api.github.com/graphql)
-        
-        # Check for errors in the response
-        if echo "$PROJECTS_RESPONSE" | jq -e '.errors' > /dev/null; then
-          echo "❌ ERROR: GraphQL query failed"
-          echo "$PROJECTS_RESPONSE" | jq -r '.errors'
-          exit 1
+        # Format PR reference
+        if [ -n "${{ inputs.pr-url }}" ] && [ -n "${{ inputs.pr-number }}" ]; then
+          PR_REF="PR #${{ inputs.pr-number }} ${ACTION}: ${{ inputs.pr-url }}"
+        elif [ -n "${{ inputs.pr-number }}" ]; then
+          PR_REF="PR #${{ inputs.pr-number }} ${ACTION}"
+        else
+          PR_REF="Status updated"
         fi
         
-        # Extract field ID and option ID
-        PROJECT_DATA=$(echo $PROJECTS_RESPONSE | jq -r ".data.organization.projectsV2.nodes[] | select(.title == \"$PROJECT_NAME\")")
+        # Create comment message
+        MESSAGE="${EMOJI} ${PR_REF}\n\n✅ Status updated to: **${{ inputs.status }}**"
         
-        if [ -z "$PROJECT_DATA" ]; then
-          echo "❌ ERROR: Project '$PROJECT_NAME' not found in organization '${{ inputs.organization }}'"
-          exit 1
-        fi
-        
-        PROJECT_ID=$(echo $PROJECT_DATA | jq -r '.id')
-        FIELD_ID=$(echo $PROJECT_DATA | jq -r '.field.id')
-        OPTION_ID=$(echo $PROJECT_DATA | jq -r ".field.options[] | select(.name == \"${{ inputs.status }}\") | .id")
-        
-        if [ -z "$OPTION_ID" ]; then
-          echo "❌ ERROR: Status '${{ inputs.status }}' not found in project"
-          echo "Available statuses:"
-          echo $PROJECT_DATA | jq -r '.field.options[].name'
-          exit 1
-        fi
-        
-        # Get the issue's project item ID
-        ISSUE_QUERY=$(cat <<EOF
-        {
-          repository(owner: "$REPO_OWNER", name: "$REPO_NAME") {
-            issue(number: ${{ inputs.issue-number }}) {
-              projectItems(first: 10) {
-                nodes {
-                  id
-                  isArchived
-                  project {
-                    id
-                  }
-                }
-              }
-            }
-          }
-        }
-        EOF
-        )
-        
-        ISSUE_REQUEST_BODY=$(jq -n --arg query "$ISSUE_QUERY" '{ query: $query }')
-        ISSUE_RESPONSE=$(curl -s -H "Authorization: bearer $GITHUB_TOKEN" \
-          -H "Content-Type: application/json" \
-          -X POST \
-          -d "$ISSUE_REQUEST_BODY" \
-          https://api.github.com/graphql)
-        
-        # Check for errors
-        if echo "$ISSUE_RESPONSE" | jq -e '.errors' > /dev/null; then
-          echo "❌ ERROR: Failed to fetch issue project items"
-          echo "$ISSUE_RESPONSE" | jq -r '.errors'
-          exit 1
-        fi
-        
-        # Get item and check if it's archived
-        ITEM_DATA=$(echo $ISSUE_RESPONSE | jq -r ".data.repository.issue.projectItems.nodes[] | select(.project.id == \"$PROJECT_ID\")")
-        ITEM_ID=$(echo $ITEM_DATA | jq -r ".id")
-        IS_ARCHIVED=$(echo $ITEM_DATA | jq -r ".isArchived")
-        
-        if [ -z "$ITEM_ID" ]; then
-          echo "⚠️ WARNING: Issue #${{ inputs.issue-number }} not found in project '$PROJECT_NAME'"
-          echo "Skipping status update - no action needed"
-          exit 0
-        fi
-        
-        if [ "$IS_ARCHIVED" == "true" ]; then
-          echo "⚠️ WARNING: Issue #${{ inputs.issue-number }} is archived in project '$PROJECT_NAME' and cannot be updated"
-          echo "Skipping status update for archived issue - no action needed"
-          exit 0
-        fi
-        
-        # Update the status
-        UPDATE_MUTATION=$(cat <<EOF
-        mutation {
-          updateProjectV2ItemFieldValue(input: {
-            projectId: "$PROJECT_ID"
-            itemId: "$ITEM_ID"
-            fieldId: "$FIELD_ID"
-            value: {
-              singleSelectOptionId: "$OPTION_ID"
-            }
-          }) {
-            projectV2Item {
-              id
-            }
-          }
-        }
-        EOF
-        )
-        
-        UPDATE_REQUEST_BODY=$(jq -n --arg query "$UPDATE_MUTATION" '{ query: $query }')
-        
-        UPDATE_RESPONSE=$(curl -s -H "Authorization: bearer $GITHUB_TOKEN" \
-          -H "Content-Type: application/json" \
-          -X POST \
-          -d "$UPDATE_REQUEST_BODY" \
-          https://api.github.com/graphql)
-        
-        # Check for errors
-        if echo "$UPDATE_RESPONSE" | jq -e '.errors' > /dev/null; then
-          echo "❌ ERROR: Failed to update status"
-          echo "$UPDATE_RESPONSE" | jq -r '.errors'
-          exit 1
-        fi
-        
-        echo "✅ Successfully updated issue #${{ inputs.issue-number }} to status: ${{ inputs.status }}"
-        
-        # Add a comment to the issue (optional, only if gh is available)
+        # Use GitHub CLI to add comment if available
         if command -v gh &> /dev/null; then
-          gh issue comment ${{ inputs.issue-number }} \
-            --body "✅ Status automatically updated to: **${{ inputs.status }}**" || true
+          if ! gh issue comment ${{ inputs.issue-number }} --body "${MESSAGE}"; then
+            echo "Failed to add comment using GitHub CLI"
+            exit 1
+          fi
+        else
+          # Fall back to curl API call if GitHub CLI not available
+          COMMENT_JSON=$(jq -n --arg body "${MESSAGE}" '{"body": $body}')
+          REPO=$(echo $GITHUB_REPOSITORY)
+          
+          if ! curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d "${COMMENT_JSON}" \
+            "https://api.github.com/repos/${REPO}/issues/${{ inputs.issue-number }}/comments"; then
+            echo "Failed to add comment using API"
+            exit 1
+          fi
         fi
+        
+        echo "Successfully updated issue #${{ inputs.issue-number }} with status: ${{ inputs.status }}"

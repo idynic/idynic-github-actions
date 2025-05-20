@@ -1,185 +1,35 @@
 name: 'Extract Issue Reference'
-description: 'Extract issue numbers from PR title, body or branch name following GitHub best practices'
+description: 'Extract issue number from branch name following standard format issue-XXX'
 inputs:
-  pr-title:
-    description: 'The PR title to extract issue numbers from'
+  branch-name:
+    description: 'The branch name to extract issue number from'
     required: true
-  pr-body:
-    description: 'The PR body to extract issue numbers from'
-    required: true
-  pr-branch:
-    description: 'The branch name to extract issue numbers from'
-    required: true
-  pr-action:
-    description: 'The PR action (opened, synchronize, ready_for_review, closed)'
-    required: true
-  pr-merged:
-    description: 'Whether the PR was merged (for closed events)'
-    required: false
-    default: 'false'
-  check-update-status-tag:
-    description: 'Whether to check for [update-status] tag in PR title for synchronize events'
-    default: 'true'
-    required: false
 
 outputs:
   issue-number:
     description: 'The extracted issue number (if found)'
     value: ${{ steps.extract.outputs.issue_number }}
-  should-update-status:
-    description: 'Whether the issue status should be updated based on PR event type'
-    value: ${{ steps.check-status-update.outputs.should_update }}
-  update-status:
-    description: 'The status to update the issue to (if should-update-status is true)'
-    value: ${{ steps.check-status-update.outputs.status }}
-  should-comment:
-    description: 'Whether a comment should be added to the issue'
-    value: ${{ steps.check-comment.outputs.should_comment }}
-  comment-type:
-    description: 'The type of comment to add (opened, ready, sync, merged)'
-    value: ${{ steps.check-comment.outputs.comment_type }}
+  found:
+    description: 'Whether an issue number was found'
+    value: ${{ steps.extract.outputs.found }}
 
 runs:
   using: 'composite'
   steps:
-    - name: Debug PR info
-      shell: bash
-      run: |
-        echo "PR Title: ${{ inputs.pr-title }}"
-        echo "PR Action: ${{ inputs.pr-action }}"
-        echo "PR Branch: ${{ inputs.pr-branch }}"
-        
-        # Safely output PR body to a file instead of directly echoing it
-        echo "Writing PR body to debug file..."
-        echo '${{ inputs.pr-body }}' > pr_body_debug.txt
-
-    - name: Extract issue number from PR
+    - name: Extract issue number from branch name
       id: extract
       shell: bash
       run: |
-        # First check title for common issue references - ONLY explicit keywords, stricter pattern
-        ISSUE_NUMBER=$(echo "${{ inputs.pr-title }}" | grep -o -E '([Ff]ix(es|ed)?|[Cc]los(e|es|ed)|[Rr]esolv(e|es|ed)|[Ii]mplements)\s+#[0-9]+' | grep -o '[0-9]\+' | head -1)
+        BRANCH_NAME="${{ inputs.branch-name }}"
+        echo "Extracting issue number from branch: $BRANCH_NAME"
         
-        # If not found in title, look for explicit references in the body
-        if [ -z "$ISSUE_NUMBER" ]; then
-          # Write PR body to file with single quotes to avoid shell interpretation issues
-          echo '${{ inputs.pr-body }}' > pr_body.txt
-          ISSUE_NUMBER=$(grep -o -E '([Ff]ix(es|ed)?|[Cc]los(e|es|ed)|[Rr]esolv(e|es|ed)|[Ii]mplements)\s+#[0-9]+' pr_body.txt | grep -o '[0-9]\+' | head -1)
-        fi
-        
-        # If not found, try to extract from branch name (issue-123-description or issue-123)
-        if [ -z "$ISSUE_NUMBER" ]; then
-          BRANCH_NAME="${{ inputs.pr-branch }}"
-          if [[ "$BRANCH_NAME" =~ ^issue-([0-9]+) ]]; then
-            ISSUE_NUMBER="${BASH_REMATCH[1]}"
-          fi
-        fi
-        
-        if [ -n "$ISSUE_NUMBER" ]; then
+        # Extract issue number from branch name (issue-123-description or issue-123)
+        if [[ "$BRANCH_NAME" =~ ^issue-([0-9]+) ]]; then
+          ISSUE_NUMBER="${BASH_REMATCH[1]}"
           echo "Found issue number: #$ISSUE_NUMBER"
           echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+          echo "found=true" >> $GITHUB_OUTPUT
         else
-          echo "No issue number found in PR title, body, or branch name"
+          echo "No issue number found in branch name"
+          echo "found=false" >> $GITHUB_OUTPUT
         fi
-        
-        # For all events, log extraction results for diagnostics
-        echo "Event type: ${{ inputs.pr-action }}"
-        echo "Issue extraction result: ${ISSUE_NUMBER:-none}"
-
-    - name: Determine if status should be updated
-      id: check-status-update
-      shell: bash
-      run: |
-        # Default to not updating status
-        SHOULD_UPDATE="false"
-        STATUS=""
-        
-        # Following GitHub best practices for issue status updates:
-        # 1. Opened or Ready for Review → Waiting for Review
-        # 2. Merged → Done
-        # 3. Synchronize → Only update if PR title contains [update-status]
-        
-        if [ "${{ steps.extract.outputs.issue_number }}" != "" ]; then
-          if [ "${{ inputs.pr-action }}" == "opened" ] || [ "${{ inputs.pr-action }}" == "ready_for_review" ]; then
-            SHOULD_UPDATE="true"
-            STATUS="Waiting for Review"
-            echo "PR ${{ inputs.pr-action }} - Setting status to Waiting for Review"
-            
-          elif [ "${{ inputs.pr-action }}" == "synchronize" ] && [ "${{ inputs.check-update-status-tag }}" == "true" ]; then
-            # For synchronize events, only update if PR title contains [update-status]
-            if echo "${{ inputs.pr-title }}" | grep -q "\[update-status\]"; then
-              SHOULD_UPDATE="true"
-              STATUS="Waiting for Review"
-              echo "PR synchronized with [update-status] tag - Setting status to Waiting for Review"
-            else
-              echo "PR synchronized without [update-status] tag - Not updating status"
-            fi
-            
-          elif [ "${{ inputs.pr-action }}" == "closed" ]; then
-            # For closed PRs, check if it was merged
-            IS_MERGED=$(echo "${{ inputs.pr-merged }}" | tr '[:upper:]' '[:lower:]')
-            if [ "$IS_MERGED" == "true" ]; then
-              SHOULD_UPDATE="true"
-              STATUS="Done"
-              echo "PR merged - Setting status to Done"
-            else
-              echo "PR closed without merging - Not updating status"
-            fi
-          else
-            echo "PR action '${{ inputs.pr-action }}' doesn't trigger a status update"
-          fi
-        else
-          echo "No issue number found - Not updating status"
-        fi
-        
-        echo "should_update=$SHOULD_UPDATE" >> $GITHUB_OUTPUT
-        echo "status=$STATUS" >> $GITHUB_OUTPUT
-
-    - name: Determine if comment should be added
-      id: check-comment
-      shell: bash
-      run: |
-        # Default to not adding a comment
-        SHOULD_COMMENT="false"
-        COMMENT_TYPE=""
-        
-        if [ "${{ steps.extract.outputs.issue_number }}" != "" ]; then
-          if [ "${{ inputs.pr-action }}" == "opened" ]; then
-            SHOULD_COMMENT="true"
-            COMMENT_TYPE="opened"
-            echo "PR opened - Adding opened comment"
-            
-          elif [ "${{ inputs.pr-action }}" == "ready_for_review" ]; then
-            SHOULD_COMMENT="true"
-            COMMENT_TYPE="ready"
-            echo "PR ready for review - Adding ready comment"
-            
-          elif [ "${{ inputs.pr-action }}" == "synchronize" ] && [ "${{ inputs.check-update-status-tag }}" == "true" ]; then
-            # For synchronize events, only comment if PR title contains [update-status]
-            if echo "${{ inputs.pr-title }}" | grep -q "\[update-status\]"; then
-              SHOULD_COMMENT="true"
-              COMMENT_TYPE="sync"
-              echo "PR synchronized with [update-status] tag - Adding sync comment"
-            else
-              echo "PR synchronized without [update-status] tag - Not adding comment"
-            fi
-            
-          elif [ "${{ inputs.pr-action }}" == "closed" ]; then
-            # For closed PRs, check if it was merged
-            IS_MERGED=$(echo "${{ inputs.pr-merged }}" | tr '[:upper:]' '[:lower:]')
-            if [ "$IS_MERGED" == "true" ]; then
-              SHOULD_COMMENT="true"
-              COMMENT_TYPE="merged"
-              echo "PR merged - Adding merged comment"
-            else
-              echo "PR closed without merging - Not adding comment"
-            fi
-          else
-            echo "PR action '${{ inputs.pr-action }}' doesn't trigger a comment"
-          fi
-        else
-          echo "No issue number found - Not adding comment"
-        fi
-        
-        echo "should_comment=$SHOULD_COMMENT" >> $GITHUB_OUTPUT
-        echo "comment_type=$COMMENT_TYPE" >> $GITHUB_OUTPUT
