@@ -1,0 +1,141 @@
+name: PR Status Update Reusable Workflow
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        description: 'The PR number'
+        type: number
+        required: true
+      pr_title:
+        description: 'The PR title'
+        type: string
+        required: true
+      pr_body:
+        description: 'The PR body text'
+        type: string
+        required: false
+        default: ''
+      pr_branch:
+        description: 'The PR branch name'
+        type: string
+        required: true
+      pr_action:
+        description: 'The PR action (opened, ready_for_review, closed)'
+        type: string
+        required: true
+      pr_merged:
+        description: 'Whether the PR was merged'
+        type: boolean
+        required: false
+        default: false
+      pr_url:
+        description: 'The PR URL'
+        type: string
+        required: true
+    secrets:
+      github_token:
+        required: true
+
+jobs:
+  update-linked-issue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add debug output
+        run: |
+          echo "Repository: ${{ github.repository }}"
+          echo "PR Number: ${{ inputs.pr_number }}"
+          echo "PR Title: ${{ inputs.pr_title }}"
+          echo "PR Action: ${{ inputs.pr_action }}"
+          echo "PR Merged: ${{ inputs.pr_merged }}"
+          echo "PR Branch: ${{ inputs.pr_branch }}"
+
+      # Extract issue number directly from PR title or body using regex
+      - name: Extract issue reference
+        id: extract
+        run: |
+          PR_TITLE="${{ inputs.pr_title }}"
+          PR_BODY="${{ inputs.pr_body }}"
+          
+          # Extract issue numbers from standard formats like "Fix #123" or "Closes #456"
+          # Check title first
+          if [[ "$PR_TITLE" =~ [fF]ix(es)?[[:space:]]*\#([0-9]+) || 
+                "$PR_TITLE" =~ [cC]lose(s)?[[:space:]]*\#([0-9]+) || 
+                "$PR_TITLE" =~ [rR]esolve(s)?[[:space:]]*\#([0-9]+) ||
+                "$PR_TITLE" =~ [iI]ssue[[:space:]]*\#([0-9]+) ]]; then
+            ISSUE_NUMBER="${BASH_REMATCH[2]}"
+            echo "Found issue number #$ISSUE_NUMBER in PR title"
+            echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Check body if not found in title
+          if [[ "$PR_BODY" =~ [fF]ix(es)?[[:space:]]*\#([0-9]+) || 
+                "$PR_BODY" =~ [cC]lose(s)?[[:space:]]*\#([0-9]+) || 
+                "$PR_BODY" =~ [rR]esolve(s)?[[:space:]]*\#([0-9]+) ||
+                "$PR_BODY" =~ [iI]ssue[[:space:]]*\#([0-9]+) ]]; then
+            ISSUE_NUMBER="${BASH_REMATCH[2]}"
+            echo "Found issue number #$ISSUE_NUMBER in PR body"
+            echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Branch name as fallback only
+          BRANCH_NAME="${{ inputs.pr_branch }}"
+          if [[ "$BRANCH_NAME" =~ ^issue-([0-9]+) ]]; then
+            ISSUE_NUMBER="${BASH_REMATCH[1]}"
+            echo "Found issue number #$ISSUE_NUMBER in branch name (fallback)"
+            echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "No issue number found in PR title, body, or branch name"
+          echo "found=false" >> $GITHUB_OUTPUT
+          exit 0
+
+      # Debug extraction
+      - name: Print extraction results
+        if: always()
+        run: |
+          echo "Found issue: ${{ steps.extract.outputs.found }}"
+          echo "Issue number: ${{ steps.extract.outputs.issue_number }}"
+
+      # Update status based on PR action
+      - name: PR opened or ready for review
+        if: steps.extract.outputs.found == 'true' && (inputs.pr_action == 'opened' || inputs.pr_action == 'ready_for_review')
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.github_token }}
+          script: |
+            // Add comment about PR being opened or ready for review
+            const message = '${{ inputs.pr_action }}' === 'ready_for_review' 
+              ? `📋 Pull Request #${{ inputs.pr_number }} is ready for review: ${{ inputs.pr_url }}\n\n✅ Issue status updated to: **Waiting for Review**`
+              : `📋 Pull Request #${{ inputs.pr_number }} opened for this issue: ${{ inputs.pr_url }}\n\n✅ Issue status updated to: **Waiting for Review**`;
+              
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: parseInt('${{ steps.extract.outputs.issue_number }}'),
+              body: message
+            });
+            
+            console.log(`Updated status of issue #${{ steps.extract.outputs.issue_number }} to Waiting for Review`);
+
+      # Handle PR merge
+      - name: Handle merged PR
+        if: steps.extract.outputs.found == 'true' && inputs.pr_action == 'closed' && inputs.pr_merged == true
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.github_token }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: parseInt('${{ steps.extract.outputs.issue_number }}'),
+              body: `🎉 Pull Request #${{ inputs.pr_number }} has been merged!\n\n✅ Issue status updated to: **Done**`
+            });
+            
+            console.log(`Updated status of issue #${{ steps.extract.outputs.issue_number }} to Done`);

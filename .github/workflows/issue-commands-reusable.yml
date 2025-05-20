@@ -1,0 +1,96 @@
+name: Issue Commands Reusable Workflow
+
+on:
+  workflow_call:
+    inputs:
+      command_name:
+        description: 'The command to handle (e.g., start)'
+        type: string
+        required: true
+      issue_number:
+        description: 'The issue number'
+        type: number
+        required: true
+    secrets:
+      github_token:
+        required: true
+      project_token:
+        required: true
+
+jobs:
+  handle-command:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.github_token }}
+          
+      - name: Checkout GitHub Actions
+        uses: actions/checkout@v4
+        with:
+          repository: idynic/idynic-github-actions
+          path: .github/actions
+          token: ${{ secrets.project_token }}
+
+      - name: Add debug output
+        run: |
+          echo "Repository: ${{ github.repository }}"
+          echo "Issue Number: ${{ inputs.issue_number }}"
+          echo "Command: ${{ inputs.command_name }}"
+          echo "Current directory:"
+          ls -la
+          echo "GitHub Actions directory:"
+          ls -la .github/actions
+
+      - name: Handle command
+        id: handle-command
+        uses: ./.github/actions/handle-issue-commands
+        with:
+          command: ${{ inputs.command_name }}
+          issue-number: ${{ inputs.issue_number }}
+          github-token: ${{ secrets.github_token }}
+          repository: ${{ github.repository }}
+          comment-user: ${{ github.event.comment.user.login }}
+
+      - name: Create branch for issue
+        if: inputs.command_name == 'start' && steps.handle-command.outputs.authorized == 'true' && steps.handle-command.outputs.processed == 'true'
+        uses: ./.github/actions/create-issue-branch
+        with:
+          issue-number: ${{ inputs.issue_number }}
+          github-token: ${{ secrets.github_token }}
+          repository: ${{ github.repository }}
+
+      # Update issue status based on command
+      - name: Update issue status
+        if: steps.handle-command.outputs.authorized == 'true' && steps.handle-command.outputs.processed == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.github_token }}
+          script: |
+            let statusMessage = '';
+            let status = '';
+            
+            if ('${{ inputs.command_name }}' === 'start') {
+              status = 'In Progress';
+              statusMessage = `✅ Issue status updated to: **${status}**\n\nA branch has been created for you to work on this issue.`;
+            } else if ('${{ inputs.command_name }}' === 'review') {
+              status = 'Waiting for Review';
+              statusMessage = `✅ Issue status updated to: **${status}**`;
+            } else if ('${{ inputs.command_name }}' === 'done') {
+              status = 'Done';
+              statusMessage = `✅ Issue status updated to: **${status}**`;
+            } else {
+              status = 'Updated';
+              statusMessage = `✅ Issue status updated to: **${status}**`;
+            }
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              body: statusMessage
+            });
+            
+            console.log(`Updated status of issue #${{ inputs.issue_number }} to ${status}`);
