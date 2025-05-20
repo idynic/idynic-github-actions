@@ -34,7 +34,7 @@ on:
         type: string
         required: true
     secrets:
-      github_token:
+      token:
         required: true
 
 jobs:
@@ -108,7 +108,7 @@ jobs:
         if: steps.extract.outputs.found == 'true' && (inputs.pr_action == 'opened' || inputs.pr_action == 'ready_for_review')
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.github_token }}
+          github-token: ${{ secrets.token }}
           script: |
             // Add comment about PR being opened or ready for review
             const message = '${{ inputs.pr_action }}' === 'ready_for_review' 
@@ -129,7 +129,7 @@ jobs:
         if: steps.extract.outputs.found == 'true' && inputs.pr_action == 'closed' && inputs.pr_merged == true
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.github_token }}
+          github-token: ${{ secrets.token }}
           script: |
             await github.rest.issues.createComment({
               owner: context.repo.owner,
