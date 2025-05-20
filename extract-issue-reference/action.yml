@@ -57,14 +57,14 @@ runs:
       id: extract
       shell: bash
       run: |
-        # First check title for common issue references
-        ISSUE_NUMBER=$(echo "${{ inputs.pr-title }}" | grep -o -E '([Ff]ix(es|ed)?|[Cc]los(e|es|ed)|[Rr]esolv(e|es|ed)|[Ii]ssue|#)[[:space:]]*#?[0-9]+' | grep -o '[0-9]\+' | head -1)
+        # First check title for common issue references - ONLY explicit keywords, stricter pattern
+        ISSUE_NUMBER=$(echo "${{ inputs.pr-title }}" | grep -o -E '([Ff]ix(es|ed)?|[Cc]los(e|es|ed)|[Rr]esolv(e|es|ed)|[Ii]mplements)\s+#[0-9]+' | grep -o '[0-9]\+' | head -1)
         
-        # If not found in title, extract from beginning of body (safer)
+        # If not found in title, look for explicit references in the body
         if [ -z "$ISSUE_NUMBER" ]; then
           # Write PR body to file with single quotes to avoid shell interpretation issues
-          echo '${{ inputs.pr-body }}' | head -n 10 > pr_body.txt
-          ISSUE_NUMBER=$(grep -o -E '([Ff]ix(es|ed)?|[Cc]los(e|es|ed)|[Rr]esolv(e|es|ed)|[Ii]ssue|#)[[:space:]]*#?[0-9]+' pr_body.txt | grep -o '[0-9]\+' | head -1)
+          echo '${{ inputs.pr-body }}' > pr_body.txt
+          ISSUE_NUMBER=$(grep -o -E '([Ff]ix(es|ed)?|[Cc]los(e|es|ed)|[Rr]esolv(e|es|ed)|[Ii]mplements)\s+#[0-9]+' pr_body.txt | grep -o '[0-9]\+' | head -1)
         fi
         
         # If not found, try to extract from branch name (issue-123-description or issue-123)
