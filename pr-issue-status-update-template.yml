@@ -2,7 +2,7 @@ name: PR Issue Status Update
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, closed]
+    types: [opened, ready_for_review, closed]
 
 permissions:
   issues: write
@@ -16,79 +16,95 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # Use a standard token for this checkout
+          fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Checkout GitHub Actions
-        uses: actions/checkout@v4
-        with:
-          repository: idynic/idynic-github-actions
-          path: .github/actions
-          token: ${{ secrets.PROJECT_TOKEN || secrets.GITHUB_TOKEN }}
+      - name: Add debug output
+        run: |
+          echo "Repository: ${{ github.repository }}"
+          echo "PR Number: ${{ github.event.pull_request.number }}"
+          echo "PR Title: ${{ github.event.pull_request.title }}"
+          echo "PR Body: ${{ github.event.pull_request.body }}"
+          echo "PR Action: ${{ github.event.action }}"
+          echo "PR Merged: ${{ github.event.pull_request.merged || 'false' }}"
 
-      # Extract issue number from PR and determine status update strategy
+      # Extract issue number directly from PR title or body using regex
       - name: Extract issue reference
-        id: extract-issue
-        uses: ./.github/actions/extract-issue-reference
-        with:
-          pr-title: ${{ github.event.pull_request.title }}
-          pr-body: ${{ github.event.pull_request.body }}
-          pr-branch: ${{ github.event.pull_request.head.ref }}
-          pr-action: ${{ github.event.action }}
-          check-update-status-tag: "true"
+        id: extract
+        run: |
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_BODY="${{ github.event.pull_request.body }}"
+          
+          # Extract issue numbers from standard formats like "Fix #123" or "Closes #456"
+          # Check title first
+          if [[ "$PR_TITLE" =~ [fF]ix(es)?[[:space:]]*\#([0-9]+) || 
+                "$PR_TITLE" =~ [cC]lose(s)?[[:space:]]*\#([0-9]+) || 
+                "$PR_TITLE" =~ [rR]esolve(s)?[[:space:]]*\#([0-9]+) ||
+                "$PR_TITLE" =~ [iI]ssue[[:space:]]*\#([0-9]+) ]]; then
+            ISSUE_NUMBER="${BASH_REMATCH[2]}"
+            echo "Found issue number #$ISSUE_NUMBER in PR title"
+            echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Check body if not found in title
+          if [[ "$PR_BODY" =~ [fF]ix(es)?[[:space:]]*\#([0-9]+) || 
+                "$PR_BODY" =~ [cC]lose(s)?[[:space:]]*\#([0-9]+) || 
+                "$PR_BODY" =~ [rR]esolve(s)?[[:space:]]*\#([0-9]+) ||
+                "$PR_BODY" =~ [iI]ssue[[:space:]]*\#([0-9]+) ]]; then
+            ISSUE_NUMBER="${BASH_REMATCH[2]}"
+            echo "Found issue number #$ISSUE_NUMBER in PR body"
+            echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Branch name as fallback only
+          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+          if [[ "$BRANCH_NAME" =~ ^issue-([0-9]+) ]]; then
+            ISSUE_NUMBER="${BASH_REMATCH[1]}"
+            echo "Found issue number #$ISSUE_NUMBER in branch name (fallback)"
+            echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "No issue number found in PR title, body, or branch name"
+          echo "found=false" >> $GITHUB_OUTPUT
+          exit 0
 
-      # Update issue status if needed
-      - name: Update issue status
-        if: steps.extract-issue.outputs.should-update-status == 'true'
-        uses: ./.github/actions/update-issue-status
-        with:
-          issue-number: ${{ steps.extract-issue.outputs.issue-number }}
-          status: ${{ steps.extract-issue.outputs.update-status }}
-          token: ${{ secrets.PROJECT_TOKEN || secrets.GITHUB_TOKEN }}
-          organization: ${{ github.repository_owner }}
+      # Debug extraction
+      - name: Print extraction results
+        if: always()
+        run: |
+          echo "Found issue: ${{ steps.extract.outputs.found }}"
+          echo "Issue number: ${{ steps.extract.outputs.issue_number }}"
 
-      # Add appropriate comment to issue
-      - name: Add PR opened comment
-        if: steps.extract-issue.outputs.should-comment == 'true' && steps.extract-issue.outputs.comment-type == 'opened'
+      # Update status based on PR action
+      - name: PR opened or ready for review
+        if: steps.extract.outputs.found == 'true' && (github.event.action == 'opened' || github.event.action == 'ready_for_review')
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            // Add comment about PR being opened or ready for review
+            const message = '${{ github.event.action }}' === 'ready_for_review' 
+              ? `📋 Pull Request #${{ github.event.pull_request.number }} is ready for review: ${{ github.event.pull_request.html_url }}\n\n✅ Issue status updated to: **Waiting for Review**`
+              : `📋 Pull Request #${{ github.event.pull_request.number }} opened for this issue: ${{ github.event.pull_request.html_url }}\n\n✅ Issue status updated to: **Waiting for Review**`;
+              
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: ${{ steps.extract-issue.outputs.issue-number }},
-              body: `📋 Pull Request #${{ github.event.pull_request.number }} opened for this issue: ${{ github.event.pull_request.html_url }}\n\n✅ Issue status updated to: **Waiting for Review**`
-            });
-
-      - name: Add review ready comment
-        if: steps.extract-issue.outputs.should-comment == 'true' && steps.extract-issue.outputs.comment-type == 'ready'
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: ${{ steps.extract-issue.outputs.issue-number }},
-              body: `📋 Pull Request #${{ github.event.pull_request.number }} is ready for review: ${{ github.event.pull_request.html_url }}\n\n✅ Issue status updated to: **Waiting for Review**`
+              issue_number: parseInt('${{ steps.extract.outputs.issue_number }}'),
+              body: message
             });
             
-      - name: Add status update comment
-        if: steps.extract-issue.outputs.should-comment == 'true' && steps.extract-issue.outputs.comment-type == 'sync'
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: ${{ steps.extract-issue.outputs.issue-number }},
-              body: `🔄 PR #${{ github.event.pull_request.number }} updated with new commits: ${{ github.event.pull_request.html_url }}\n\n✅ Issue status updated to: **Waiting for Review**`
-            });
+            console.log(`Updated status of issue #${{ steps.extract.outputs.issue_number }} to Waiting for Review`);
 
-      - name: Add merged comment
-        if: steps.extract-issue.outputs.should-comment == 'true' && steps.extract-issue.outputs.comment-type == 'merged'
+      # Handle PR merge
+      - name: Handle merged PR
+        if: steps.extract.outputs.found == 'true' && github.event.action == 'closed' && github.event.pull_request.merged == true
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -96,6 +112,8 @@ jobs:
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: ${{ steps.extract-issue.outputs.issue-number }},
+              issue_number: parseInt('${{ steps.extract.outputs.issue_number }}'),
               body: `🎉 Pull Request #${{ github.event.pull_request.number }} has been merged!\n\n✅ Issue status updated to: **Done**`
             });
+            
+            console.log(`Updated status of issue #${{ steps.extract.outputs.issue_number }} to Done`);
