@@ -44,7 +44,10 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
+        GITHUB_TOKEN: ${{ inputs.github_token }} # Add redundant token for max compatibility
       run: |
+        echo "ACTION START: $(date)"
+        echo "GitHub Runner OS: $(uname -a)"
         set -euo pipefail
 
         # Fetch Project ID
@@ -104,8 +107,14 @@ runs:
         # Create GraphQL query for project
         PROJECT_QUERY="query GetProject(\$owner: String!, \$number: Int!) { ${OWNER_TYPE}(login: \$owner) { projectV2(number: \$number) { id title } } }"
         
-        # Execute GraphQL query
-        PROJECT_RESPONSE=$(gh api graphql -f query="$PROJECT_QUERY" -F owner="${{ inputs.owner_login }}" -F number=${{ inputs.project_number }} 2>&1)
+        # Debug query
+        echo "Executing project query with variables:"
+        echo "  - owner: ${{ inputs.owner_login }}"
+        echo "  - number: ${{ inputs.project_number }}"
+        echo "  - owner_type: $OWNER_TYPE"
+        
+        # Execute GraphQL query with more robust handling
+        PROJECT_RESPONSE=$(gh api graphql --jq .data -f query="$PROJECT_QUERY" -F owner="${{ inputs.owner_login }}" -F number=${{ inputs.project_number }} 2>&1 || echo "{ \"error\": \"$?\" }")
         
         # Check exit code
         if [ $? -ne 0 ]; then
@@ -163,6 +172,14 @@ runs:
         
         # Extract all field names for error reporting
         FIELD_NAMES=$(echo "$FIELDS_RESPONSE" | jq -r '.data.node.fields.nodes[].name')
+        
+        # Debug field information
+        echo "Looking for status field: '${{ inputs.status_field_name }}'"
+        echo "Looking for status option: '${{ inputs.target_status_value }}'"
+        
+        # Print available fields for debugging
+        echo "Available fields in project:"
+        echo "$FIELD_NAMES" | sed 's/^/  - /'
         
         # Extract field ID and option ID with jq
         IDS_RESULT=$(echo "$FIELDS_RESPONSE" | jq --arg fieldName "${{ inputs.status_field_name }}" --arg optionName "${{ inputs.target_status_value }}" '
@@ -250,11 +267,17 @@ runs:
           exit 1
         fi
         
+        # Debug content item 
+        echo "Checking project items response:"
+        echo "$CONTENT_RESPONSE" | jq '.data.node.projectItems'
+        
         # Find if content is already on this project
         PROJECT_ITEM_ID=$(echo "$CONTENT_RESPONSE" | jq --arg projectId "$PROJECT_ID" -r '
           .data.node.projectItems.nodes[] | 
           select(.project.id == $projectId) | 
           .id' | head -n 1)
+          
+        echo "Project item ID result: $PROJECT_ITEM_ID"
         
         # Add item to project if not found
         if [ -z "$PROJECT_ITEM_ID" ]; then
