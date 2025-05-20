@@ -37,14 +37,24 @@ This action encapsulates this complex workflow into a simple, reusable component
 
 ## Critical Requirements
 
-### PAT Requirements (Very Important)
+### Token Requirements
 
-The `github_token` input **MUST** be a Personal Access Token (PAT) with the following scopes:
-- `repo` - For repository access
-- `read:org` - For organization access (finding projects)
-- `project` - For project board modifications
+The `github_token` input can be one of the following:
+- **GITHUB_TOKEN**: The default token provided by GitHub Actions, with `project: write` permission added in your workflow file
+- **PAT**: A Personal Access Token with the following scopes:
+  - `repo` - For repository access
+  - `read:org` - For organization access (finding projects)
+  - `project` - For project board modifications
 
-> **Warning**: The default `GITHUB_TOKEN` provided by GitHub Actions will **NOT** work for organization projects due to permission limitations. You must create a PAT with the required scopes and store it as a repository secret.
+Example workflow permission configuration:
+```yaml
+permissions:
+  issues: write       # Required for commenting on issues
+  pull-requests: read # Required for reading PR details (if needed)
+  project: write      # Required for project board access
+```
+
+> **Important**: If using the default `GITHUB_TOKEN`, you must add `project: write` permission in your workflow file as shown above.
 
 ### Configuration Values
 
