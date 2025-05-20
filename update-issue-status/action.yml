@@ -147,6 +147,7 @@ runs:
               projectItems(first: 10) {
                 nodes {
                   id
+                  isArchived
                   project {
                     id
                   }
@@ -172,11 +173,21 @@ runs:
           exit 1
         fi
         
-        ITEM_ID=$(echo $ISSUE_RESPONSE | jq -r ".data.repository.issue.projectItems.nodes[] | select(.project.id == \"$PROJECT_ID\") | .id")
+        # Get item and check if it's archived
+        ITEM_DATA=$(echo $ISSUE_RESPONSE | jq -r ".data.repository.issue.projectItems.nodes[] | select(.project.id == \"$PROJECT_ID\")")
+        ITEM_ID=$(echo $ITEM_DATA | jq -r ".id")
+        IS_ARCHIVED=$(echo $ITEM_DATA | jq -r ".isArchived")
         
         if [ -z "$ITEM_ID" ]; then
-          echo "❌ ERROR: Issue #${{ inputs.issue-number }} not found in project '$PROJECT_NAME'"
-          exit 1
+          echo "⚠️ WARNING: Issue #${{ inputs.issue-number }} not found in project '$PROJECT_NAME'"
+          echo "Skipping status update - no action needed"
+          exit 0
+        fi
+        
+        if [ "$IS_ARCHIVED" == "true" ]; then
+          echo "⚠️ WARNING: Issue #${{ inputs.issue-number }} is archived in project '$PROJECT_NAME' and cannot be updated"
+          echo "Skipping status update for archived issue - no action needed"
+          exit 0
         fi
         
         # Update the status
